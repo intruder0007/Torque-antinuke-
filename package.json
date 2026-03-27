@@ -1,0 +1,35 @@
+{
+  "name": "@intruder214/torque-antinuke",
+  "version": "1.0.1",
+  "description": "Advanced Discord Anti-Nuke system with rate limiting and audit log protection",
+  "main": "index.js",
+  "keywords": [
+    "discord",
+    "antinuke",
+    "security",
+    "discord.js",
+    "anti-nuke",
+    "bot",
+    "nuke-protection",
+    "discord-security"
+  ],
+  "author": "Jalaj Jain",
+  "license": "MIT",
+  "engines": {
+    "node": ">=16.11.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/intruder0007/Torque-antinuke-.git"
+  },
+  "homepage": "https://github.com/intruder0007/Torque-antinuke-#readme",
+  "bugs": {
+    "url": "https://github.com/intruder0007/Torque-antinuke-/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1"
+  }
+}
