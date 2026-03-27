@@ -1,6 +1,6 @@
 {
   "name": "@intruder214/torque-antinuke",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Advanced Discord Anti-Nuke system with rate limiting and audit log protection",
   "main": "index.js",
   "keywords": [
