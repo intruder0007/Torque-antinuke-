@@ -1,8 +1,12 @@
 {
   "name": "@intruder214/torque-antinuke",
-  "version": "1.0.2",
+  "version": "2.0.0",
   "description": "Advanced Discord Anti-Nuke system with rate limiting and audit log protection",
   "main": "index.js",
+  "scripts": {
+    "start": "node bot/index.js",
+    "deploy": "node bot/deploy.js"
+  },
   "keywords": [
     "discord",
     "antinuke",
@@ -30,6 +34,7 @@
     "access": "public"
   },
   "dependencies": {
-    "discord.js": "^14.14.1"
+    "discord.js": "^14.14.1",
+    "dotenv": "^17.3.1"
   }
 }

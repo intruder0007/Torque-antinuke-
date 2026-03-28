@@ -1,6 +1,8 @@
 node_modules/
 package-lock.json
 .env
+bot/.env
+torque-data.json
 *.log
 .DS_Store
 Thumbs.db

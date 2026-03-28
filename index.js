@@ -1,147 +1,177 @@
-const { AuditLogEvent, PermissionFlagsBits } = require("discord.js");
-const checkForUpdates = require("./update-check");
-const { version } = require("./package.json");
+const { AuditLogEvent } = require('discord.js');
+const checkForUpdates = require('./update-check');
+const { version } = require('./package.json');
 
-const DANGEROUS_PERMS = [
-  PermissionFlagsBits.Administrator,
-  PermissionFlagsBits.ManageGuild,
-  PermissionFlagsBits.ManageRoles,
-  PermissionFlagsBits.ManageChannels,
-  PermissionFlagsBits.BanMembers,
-  PermissionFlagsBits.KickMembers,
-  PermissionFlagsBits.ManageWebhooks,
-];
+const DatabaseManager   = require('./src/managers/DatabaseManager');
+const EventManager      = require('./src/managers/EventManager');
+const PunishmentManager = require('./src/managers/PunishmentManager');
+const WhitelistManager  = require('./src/managers/WhitelistManager');
+const LogManager        = require('./src/managers/LogManager');
+const SnapshotManager   = require('./src/managers/SnapshotManager');
 
-const DEFAULT_LIMITS = {
-  channelDelete: 2,
-  channelCreate: 3,
-  roleDelete: 2,
-  roleCreate: 3,
-  roleDangerousUpdate: 2,
-  memberBan: 2,
-  memberKick: 2,
-  webhookCreate: 2,
-  botAdd: 1,
-  guildUpdate: 1,
-  emojiDelete: 4,
-};
+const KraunchaVyuha = require('./src/layers/KraunchaVyuha');
+const GarudaVyuha   = require('./src/layers/GarudaVyuha');
+const MakaraVyuha   = require('./src/layers/MakaraVyuha');
+const PadmaVyuha    = require('./src/layers/PadmaVyuha');
+const VajraVyuha    = require('./src/layers/VajraVyuha');
+const ChakraView    = require('./src/layers/ChakraView');
 
 class TorqueAntiNuke {
   constructor(options = {}) {
-    if (!options.client) throw new Error("[TorqueAntiNuke] client is required");
+    if (!options.client) throw new Error('[TorqueAntiNuke] options.client is required');
 
     this.client = options.client;
-    this.whitelist = new Set(options.whitelist || []);
-    this.logChannel = options.logChannel || null;
-    this.limits = { ...DEFAULT_LIMITS, ...(options.limits || {}) };
-    this.window = options.window ?? 10000;
-    this.punishment = options.punishment || "ban";
-    this._counters = new Map();
 
-    checkForUpdates("@intruder214/torque-antinuke", version);
+    // Core managers
+    this.db       = new DatabaseManager(options.dbPath || 'torque-data.json');
+    this.punisher = new PunishmentManager(this.client, this.db);
+    this.whitelist = new WhitelistManager(this.db);
+    this.logger   = new LogManager(this.db);
+    this.snapshot = new SnapshotManager();
+    this.queue    = new EventManager();
+
+    // Apply any inline options to the DB as defaults
+    if (options.whitelist) {
+      // Legacy flat whitelist array support
+      for (const id of options.whitelist) {
+        this.whitelist.setUserLevel('_global', id, 3);
+      }
+    }
+
+    // Vyuha defense layers
+    this.krauncha = new KraunchaVyuha(this.db, this.punisher, this.whitelist, this.logger);
+    this.garuda   = new GarudaVyuha(this.client, this.snapshot);
+    this.makara   = new MakaraVyuha(this.punisher, this.db, this.whitelist, this.logger);
+    this.padma    = new PadmaVyuha(this.punisher, this.db, this.whitelist, this.logger);
+    this.vajra    = new VajraVyuha(this.db, this.punisher, this.whitelist, this.logger);
+    this.chakra   = new ChakraView(this.client, this.snapshot);
+
+    checkForUpdates('@intruder214/torque-antinuke', version);
+    console.log(`[TorqueAntiNuke] v${version} — 6-Layer Vyuha Defense active`);
+
     this._listen();
   }
 
-  _tick(userId, type) {
-    if (!this._counters.has(userId)) this._counters.set(userId, {});
-    const bucket = this._counters.get(userId);
-    bucket[type] = (bucket[type] || 0) + 1;
-    setTimeout(() => { if (bucket[type] > 0) bucket[type]--; }, this.window);
-    return bucket[type];
-  }
+  /**
+   * Standard routing pipeline for most events.
+   * Garuda verifies the executor → Krauncha rate-limits → Vajra slow-burn tracks.
+   */
+  _route(guild, auditEvent, actionType) {
+    if (!guild?.available) return;
 
-  async _punish(guild, userId, reason) {
-    if (userId === guild.ownerId || userId === this.client.user?.id) return;
+    this.queue.enqueue(async () => {
+      const executorId = await this.garuda.verifyExecutor(guild, auditEvent, actionType);
+      if (!executorId) return;
 
-    try {
-      const member = await guild.members.fetch(userId).catch(() => null);
-
-      if (!member) {
-        await guild.bans.create(userId, { reason }).catch(() => {});
-        return;
+      const hit = await this.krauncha.intercept(guild, executorId, actionType);
+      if (!hit) {
+        // Didn't hit the fast rate limit — still track in Vajra for slow-burn
+        await this.vajra.checkAnomaly(guild, executorId, actionType);
       }
-
-      const me = guild.members.me;
-      if (me && member.roles.highest.position >= me.roles.highest.position) {
-        this._log(guild, `⚠️ Can't punish <@${userId}> — they're above me in the hierarchy`);
-        return;
-      }
-
-      if (this.punishment === "kick") await member.kick(reason);
-      else if (this.punishment === "strip") await member.roles.set([], reason);
-      else await member.ban({ reason, deleteMessageSeconds: 0 });
-    } catch (err) {
-      console.error(`[TorqueAntiNuke] failed to punish ${userId}:`, err.message);
-    }
-  }
-
-  _log(guild, msg) {
-    if (!this.logChannel) return;
-    const ch = guild.channels.cache.get(this.logChannel);
-    if (ch?.isTextBased()) ch.send(msg).catch(() => {});
-  }
-
-  async _getExecutor(guild, event) {
-    try {
-      const logs = await guild.fetchAuditLogs({ type: event, limit: 1 });
-      const entry = logs.entries.first();
-      if (!entry || Date.now() - entry.createdTimestamp > 3000) return null;
-      return entry.executor;
-    } catch {
-      return null;
-    }
-  }
-
-  async _check(guild, event, type) {
-    const executor = await this._getExecutor(guild, event);
-    if (!executor) return;
-    if (executor.id === guild.ownerId || executor.id === this.client.user?.id) return;
-    if (this.whitelist.has(executor.id)) return;
-
-    const count = this._tick(executor.id, type);
-    const limit = this.limits[type] ?? 3;
-
-    if (count >= limit) {
-      const reason = `[TorqueAntiNuke] ${type} limit hit (${count}/${limit})`;
-      await this._punish(guild, executor.id, reason);
-      this._log(guild, `🚨 <@${executor.id}> punished for **${type}** — ${count} actions in ${this.window / 1000}s`);
-    }
+    });
   }
 
   _listen() {
-    const { client: cl } = this;
+    const cl = this.client;
 
-    cl.on("channelDelete", ch => ch.guild && this._check(ch.guild, AuditLogEvent.ChannelDelete, "channelDelete"));
-    cl.on("channelCreate", ch => ch.guild && this._check(ch.guild, AuditLogEvent.ChannelCreate, "channelCreate"));
+    // --- Channels ---
+    cl.on('channelDelete', ch => ch.guild && this._route(ch.guild, AuditLogEvent.ChannelDelete, 'channelDelete'));
+    cl.on('channelCreate', ch => ch.guild && this._route(ch.guild, AuditLogEvent.ChannelCreate, 'channelCreate'));
 
-    cl.on("roleDelete", role => this._check(role.guild, AuditLogEvent.RoleDelete, "roleDelete"));
-    cl.on("roleCreate", role => this._check(role.guild, AuditLogEvent.RoleCreate, "roleCreate"));
+    // --- Roles ---
+    cl.on('roleDelete', role => this._route(role.guild, AuditLogEvent.RoleDelete, 'roleDelete'));
+    cl.on('roleCreate', role => this._route(role.guild, AuditLogEvent.RoleCreate, 'roleCreate'));
 
-    cl.on("roleUpdate", (old, updated) => {
-      const gained = updated.permissions.missing(old.permissions);
-      if (DANGEROUS_PERMS.some(p => gained.includes(p)))
-        this._check(updated.guild, AuditLogEvent.RoleUpdate, "roleDangerousUpdate");
+    // roleUpdate goes through Makara for deep permission analysis
+    cl.on('roleUpdate', (oldRole, newRole) => {
+      if (!newRole.guild) return;
+      this.queue.enqueue(async () => {
+        const executorId = await this.garuda.verifyExecutor(newRole.guild, AuditLogEvent.RoleUpdate, 'roleDangerousUpdate');
+        if (!executorId) return;
+        const caught = await this.makara.scanRoleUpdate(newRole.guild, executorId, oldRole, newRole);
+        if (!caught) await this.vajra.checkAnomaly(newRole.guild, executorId, 'roleDangerousUpdate');
+      });
     });
 
-    cl.on("guildBanAdd", ban => this._check(ban.guild, AuditLogEvent.MemberBanAdd, "memberBan"));
+    // --- Members ---
+    cl.on('guildBanAdd', ban => this._route(ban.guild, AuditLogEvent.MemberBanAdd, 'memberBan'));
+    cl.on('guildMemberRemove', member => this._route(member.guild, AuditLogEvent.MemberKick, 'memberKick'));
 
-    cl.on("guildMemberRemove", member => this._check(member.guild, AuditLogEvent.MemberKick, "memberKick"));
-
-    cl.on("webhookUpdate", ch => ch.guild && this._check(ch.guild, AuditLogEvent.WebhookCreate, "webhookCreate"));
-
-    cl.on("guildMemberAdd", member => {
-      if (member.user.bot) this._check(member.guild, AuditLogEvent.BotAdd, "botAdd");
+    // --- Integrations ---
+    cl.on('webhookUpdate', ch => {
+      if (!ch.guild) return;
+      this.queue.enqueue(async () => {
+        const executorId = await this.garuda.verifyExecutor(ch.guild, AuditLogEvent.WebhookCreate, 'webhookCreate');
+        if (executorId) await this.padma.scanWebhookCreate(ch.guild, executorId, ch);
+      });
     });
 
-    cl.on("guildUpdate", (_, updated) => this._check(updated, AuditLogEvent.GuildUpdate, "guildUpdate"));
+    cl.on('guildMemberAdd', member => {
+      if (!member.user.bot || !member.guild) return;
+      this.queue.enqueue(async () => {
+        const executorId = await this.garuda.verifyExecutor(member.guild, AuditLogEvent.BotAdd, 'botAdd');
+        if (executorId) await this.padma.scanBotAdd(member.guild, executorId, member);
+      });
+    });
 
-    cl.on("emojiDelete", emoji => this._check(emoji.guild, AuditLogEvent.EmojiDelete, "emojiDelete"));
+    // --- Guild structural ---
+    cl.on('guildUpdate', (oldGuild, newGuild) => {
+      if (!newGuild) return;
+      this.queue.enqueue(async () => {
+        const executorId = await this.garuda.verifyExecutor(newGuild, AuditLogEvent.GuildUpdate, 'guildUpdate');
+        if (!executorId) return;
+        const caught = await this.makara.scanGuildUpdate(newGuild, executorId, oldGuild, newGuild);
+        if (!caught) await this._route(newGuild, AuditLogEvent.GuildUpdate, 'guildUpdate');
+      });
+    });
+
+    cl.on('emojiDelete', emoji => emoji.guild && this._route(emoji.guild, AuditLogEvent.EmojiDelete, 'emojiDelete'));
+
+    // --- Ghost event escalation from Garuda ---
+    // If 3+ untracked events fire in 15s, Garuda emits this and we engage ChakraView
+    cl.on('torque_ghost_escalation', async (guild, actionType) => {
+      console.warn(`[TorqueAntiNuke] Ghost escalation on ${guild.id} for ${actionType} — engaging ChakraView`);
+      await this.chakra.engage(guild, `Ghost event escalation: ${actionType}`);
+    });
   }
 
-  addWhitelist(userId) { this.whitelist.add(userId); return this; }
-  removeWhitelist(userId) { this.whitelist.delete(userId); return this; }
-  isWhitelisted(userId) { return this.whitelist.has(userId); }
-  resetCounters(userId) { this._counters.delete(userId); return this; }
+  // --- Public API ---
+
+  setSetting(guildId, key, value) {
+    this.db.setSetting(guildId, key, value);
+    return this;
+  }
+
+  getSetting(guildId, key, def = null) {
+    return this.db.getSetting(guildId, key, def);
+  }
+
+  setUserWhitelist(guildId, userId, level) {
+    this.whitelist.setUserLevel(guildId, userId, level);
+    return this;
+  }
+
+  setRoleWhitelist(guildId, roleId, level) {
+    this.whitelist.setRoleLevel(guildId, roleId, level);
+    return this;
+  }
+
+  getWhitelistLevel(guildId, userId, memberRoles = null) {
+    return this.whitelist.getLevel(guildId, userId, memberRoles);
+  }
+
+  removeWhitelist(guildId, userId) {
+    this.whitelist.setUserLevel(guildId, userId, 0);
+    return this;
+  }
+
+  async activateChakraView(guild, reason) {
+    await this.chakra.engage(guild, reason);
+  }
+
+  async disableChakraView(guild) {
+    await this.chakra.disengage(guild);
+  }
 }
 
 module.exports = TorqueAntiNuke;
