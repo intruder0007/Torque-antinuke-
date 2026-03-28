@@ -397,7 +397,7 @@ See [CHANGELOG.md](CHANGELOG.md) for version history.
 
 ## 📄 License
 
-MIT © [Jalaj Jain](https://github.com/intruder0007)
+MIT © [Jlaj Jain](https://github.com/intruder0007)
 
 <div align="center">
 <br/>
