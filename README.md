@@ -385,15 +385,7 @@ Torque checks npm for newer versions on startup:
   npm install @intruder214/torque-antinuke@latest
 ```
 
-Silent, non-blocking, zero dependencies (uses Node's built-in `https`).
-
----
-
-## 📋 Changelog
-
-See [CHANGELOG.md](CHANGELOG.md) for version history.
-
----
+Silent, non-blocking, zero dependencies (uses Node's built-in `https://www.npmjs.com/package/@intruder214/torque-antinuke`).
 
 ## 📄 License
 
